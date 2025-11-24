@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>AI 即時循線導航（終極版）</title>
+  <style>
+    body { margin:0; background:#111; color:#fff; font-family:Arial; text-align:center; overflow:hidden; }
+    h1 { padding:15px; background:#000; margin:0; font-size:1.8em; }
+    #container { position:relative; display:inline-block; margin:10px auto; }
+    video, canvas { width:100vw; height:100vh; object-fit:cover; }
+    canvas { position:absolute; top:0; left:0; }
+    #overlay {
+      position:absolute; top:20px; left:20px; background:rgba(0,0,0,0.7);
+      padding:15px; border-radius:12px; font-size:1.5em; min-width:200px;
+    }
+    #arrow {
+      position:absolute; bottom:80px; left:50%; transform:translateX(-50%);
+      font-size:120px; opacity:0.9; pointer-events:none;
+    }
+    .hidden { display:none; }
+  </style>
+</head>
+<body>
+
+  <h1>AI 即時循線導航</h1>
+  <div id="container">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas"></canvas>
+    
+    <div id="overlay">
+      狀態：<span id="status">OpenCV 載入中…</span><br/>
+      偏移角度：<span id="angle">0°</span><br/>
+      建議：<span id="advice">請對準線條</span>
+    </div>
+    
+    <div id="arrow">直行</div>
+  </div>
+
+  <!-- OpenCV.js 官方最新版 -->
+  <script async src="https://docs.opencv.org/4.10.0/opencv.js" onload="onOpenCvReady()"></script>
+
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const status = document.getElementById('status');
+    const angleEl = document.getElementById('angle');
+    const adviceEl = document.getElementById('advice');
+    const arrowEl = document.getElementById('arrow');
+
+    let cvReady = false;
+
+    function onOpenCvReady() {
+      cvReady = true;
+      status.textContent = '就緒！點擊畫面啟動鏡頭';
+      canvas.addEventListener('click', startCamera); // 點任意處啟動
+    }
+
+    async function startCamera() {
+      if (!cvReady) return;
+      
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment", width: {ideal:1920}, height: {ideal:1080} }
+        });
+        video.srcObject = stream;
+        video.onloadedmetadata = () => {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          video.play();
+          status.textContent = '偵測中…';
+          canvas.removeEventListener('click', startCamera);
+          requestAnimationFrame(detectFrame);
+        };
+      } catch (err) {
+        status.textContent = '鏡頭失敗';
+        adviceEl.textContent = '請用 localhost 或 HTTPS 開啟此頁';
+        adviceEl.style.color = '#ff5555';
+        console.error(err);
+      }
+    }
+
+    function detectFrame() {
+      if (video.readyState < 2) { requestAnimationFrame(detectFrame); return; }
+      
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      
+      let src = cv.imread(canvas);
+      let gray = new cv.Mat();
+      let blurred = new cv.Mat();
+      let edges = new cv.Mat();
+      let lines = new cv.Mat();
+
+      // 只取下半部畫面（線條通常在下面）
+      let roi = src.roi(new cv.Rect(0, src.rows * 0.5, src.cols, src.rows * 0.5));
+      
+      cv.cvtColor(roi, gray, cv.COLOR_RGBA2GRAY);
+      cv.GaussianBlur(gray, blurred, new cv.Size(9,9), 0);
+      cv.Canny(blurred, edges, 70, 200, 3, false);
+
+      // 更寬鬆的 Hough 參數 → 更穩
+      cv.HoughLinesP(edges, lines, 1, Math.PI/180, 50, 60, 30);
+
+      let totalAngle = 0;
+      let count = 0;
+      ctx.strokeStyle = '#00ff44';
+      ctx.lineWidth = 5;
+
+      for (let i = 0; i < lines.rows; ++i) {
+        let [x1, y1, x2, y2] = [
+          lines.data32S[i*4],   lines.data32S[i*4+1] + src.rows*0.5,
+          lines.data32S[i*4+2], lines.data32S[i*4+3] + src.rows*0.5
+        ];
+        
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+
+        let angle = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
+        totalAngle += angle;
+        count++;
+      }
+
+      let avgAngle = count > 0 ? totalAngle / count : 0;
+      
+      // 更新 UI
+      angleEl.textContent = avgAngle.toFixed(1) + '°';
+      
+      if (Math.abs(avgAngle) < 8) {
+        adviceEl.textContent = '直行';
+        adviceEl.style.color = '#00ff00';
+        arrowEl.textContent = '直行';
+        arrowEl.style.color = '#00ff00';
+      } else if (avgAngle > 0) {
+        adviceEl.textContent = '右轉';
+        adviceEl.style.color = '#ffaa00';
+        arrowEl.textContent = '右轉';
+        arrowEl.style.color = '#ffaa00';
+      } else {
+        adviceEl.textContent = '左轉';
+        adviceEl.style.color = '#ffaa00';
+        arrowEl.textContent = '左轉';
+        arrowEl.style.color = '#ffaa00';
+      }
+
+      // 記憶體清理
+      src.delete(); gray.delete(); blurred.delete(); edges.delete(); lines.delete(); roi.delete();
+      
+      requestAnimationFrame(detectFrame);
+    }
+
+    // 自動嘗試啟動（部分手機支援）
+    setTimeout(() => { if (cvReady) startCamera().catch(()=>{}); }, 2000);
+  </script>
+
+  <p style="position:fixed; bottom:10px; left:0; right:0; color:#888; font-size:0.9em;">
+    2025 終極版｜OpenCV.js + ROI + AR 箭頭｜對粗黑線超級穩！
+  </p>
+<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9a37b51cfdfae2f3',t:'MTc2Mzk3NDczNy4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</html>
